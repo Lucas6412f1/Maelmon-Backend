@@ -3,21 +3,22 @@
 // 1. Benodigde pakketten importeren
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors'); // Voor cross-origin verzoeken (frontend naar backend)
-const tmi = require('tmi.js'); // Voor de Twitch bot
+const cors = require('cors');
+const tmi = require('tmi.js');
 
-// NIEUWE IMPORTS VOOR AUTHENTICATIE
 const session = require('express-session');
 const passport = require('passport');
 const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy;
 
-
-// Zorg ervoor dat dotenv bovenaan staat als je het gebruikt voor lokale tests
 require('dotenv').config();
 
 // 2. Express app initialiseren
 const app = express();
 const PORT = process.env.PORT || 10000;
+
+// Constanten
+const DAILY_PACK_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 uur in milliseconden
+const STARTING_CURRENCY = 100; // Beginvaluta voor nieuwe gebruikers
 
 // 3. Connectie maken met MongoDB Atlas
 mongoose.connect(process.env.MONGODB_URI)
@@ -27,18 +28,18 @@ mongoose.connect(process.env.MONGODB_URI)
 // 4. Mongoose Modellen definiëren
 const CardSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    type: { type: String, required: true }, // Bijvoorbeeld: 'Monster', 'Spell'
+    type: { type: String, required: true },
     attack: { type: Number, required: true },
     defense: { type: Number, required: true },
-    characterImageUrl: { type: String, required: true }, // De custom foto van het wezen/item
-    backgroundImageUrl: { type: String, required: true }, // De custom achtergrond/frame van de kaart
+    characterImageUrl: { type: String, required: true },
+    backgroundImageUrl: { type: String, required: true },
     rarity: {
         type: String,
         enum: ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Unique'],
         default: 'Common'
     },
-    maxSupply: { type: Number, default: -1 }, // -1 = onbeperkt, anders een nummer (bijv. 1, 10)
-    currentSupply: { type: Number, default: 0 }, // Hoeveel er van dit type kaart zijn gemaakt
+    maxSupply: { type: Number, default: -1 },
+    currentSupply: { type: Number, default: 0 },
     ownerId: { type: String, default: null } // Twitch user ID van de eigenaar
 });
 const Card = mongoose.model('Card', CardSchema);
@@ -49,7 +50,9 @@ const UserSchema = new mongoose.Schema({
     email: { type: String, required: false },
     profileImageUrl: { type: String, required: false },
     createdAt: { type: Date, default: Date.now },
-    isAdmin: { type: Boolean, default: false } // Om admins te identificeren
+    isAdmin: { type: Boolean, default: false },
+    currency: { type: Number, default: STARTING_CURRENCY }, // NIEUW: Valuta
+    lastPackClaimed: { type: Date, default: null } // NIEUW: Laatste claim tijdstip
 });
 const User = mongoose.model('User', UserSchema);
 
@@ -96,7 +99,8 @@ function(accessToken, refreshToken, profile, done) {
                     username: profile.display_name,
                     email: profile.email,
                     profileImageUrl: profile.profile_image_url,
-                    isAdmin: isNewAdmin
+                    isAdmin: isNewAdmin,
+                    currency: STARTING_CURRENCY // NIEUW: Geef startvaluta
                 }).save()
                   .then(newUser => {
                       console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen. Admin status: ${newUser.isAdmin}`);
@@ -232,34 +236,106 @@ app.post('/api/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
 });
 
 
+// NIEUW: API om dagelijks pakketje te claimen
+app.post('/api/user/claim-daily-pack', isAuthenticated, async (req, res) => {
+    try {
+        const user = req.user;
+        const now = new Date();
+
+        if (user.lastPackClaimed && (now.getTime() - user.lastPackClaimed.getTime()) < DAILY_PACK_COOLDOWN_MS) {
+            const timeLeft = DAILY_PACK_COOLDOWN_MS - (now.getTime() - user.lastPackClaimed.getTime());
+            const hours = Math.floor(timeLeft / (1000 * 60 * 60));
+            const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+            return res.status(400).json({ message: `Je hebt je dagelijkse pakket al geclaimd. Probeer over ${hours} uur en ${minutes} minuten opnieuw.` });
+        }
+
+        // Haal alle beschikbare kaartdefinities op (kaarten zonder eigenaarId, of templates)
+        const availableCardDefinitions = await Card.find({ ownerId: null });
+        if (availableCardDefinitions.length === 0) {
+            return res.status(404).json({ message: 'Geen kaarten beschikbaar om te winnen.' });
+        }
+
+        // Filter kaarten die hun maxSupply bereikt hebben
+        const winnableCards = availableCardDefinitions.filter(card =>
+            card.maxSupply === -1 || card.currentSupply < card.maxSupply
+        );
+
+        if (winnableCards.length === 0) {
+            return res.status(400).json({ message: 'Alle beschikbare kaarten hebben hun maximale voorraad bereikt.' });
+        }
+
+        // Selecteer een willekeurige kaart uit de winbare kaarten
+        const randomIndex = Math.floor(Math.random() * winnableCards.length);
+        const wonCardDefinition = winnableCards[randomIndex];
+
+        // Maak een kopie van de kaart en wijs deze toe aan de gebruiker
+        const newCardInstance = new Card({
+            name: wonCardDefinition.name,
+            type: wonCardDefinition.type,
+            attack: wonCardDefinition.attack,
+            defense: wonCardDefinition.defense,
+            characterImageUrl: wonCardDefinition.characterImageUrl,
+            backgroundImageUrl: wonCardDefinition.backgroundImageUrl,
+            rarity: wonCardDefinition.rarity,
+            maxSupply: wonCardDefinition.maxSupply, // De maxSupply blijft hetzelfde als de definitie
+            ownerId: user.twitchId // Wijs de kaart toe aan de gebruiker
+        });
+
+        // Verhoog de currentSupply van de OORSPRONKELIJKE kaartdefinitie
+        wonCardDefinition.currentSupply++;
+
+        // Opslaan van de nieuwe kaartinstatie en de geüpdatete definitie
+        await newCardInstance.save();
+        await wonCardDefinition.save();
+
+        // Update de gebruiker met de laatste claim tijd
+        user.lastPackClaimed = now;
+        await user.save();
+
+        res.status(200).json({ message: 'Gefeliciteerd! Je hebt een kaart gewonnen!', card: newCardInstance });
+
+    } catch (err) {
+        console.error('Fout bij claimen dagelijks pakket:', err);
+        res.status(500).json({ message: 'Interne serverfout bij claimen dagelijks pakket.' });
+    }
+});
+
 // AUTHENTICATIE ROUTES
 app.get('/auth/twitch', passport.authenticate('twitch'));
 
 app.get('/auth/twitch/callback',
-    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }), // Frontend homepage
+    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/login.html' }), // AANGEPAST: Failure redirect naar login.html
     function(req, res) {
-        // Na succesvolle login, redirect naar de /dashboard.html path van de frontend
-        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard.html'); // AANGEPAST NAAR .html
+        // Na succesvolle login, redirect naar de HOOFD app pagina (NIEUWE index.html)
+        res.redirect('https://maelmon-trading-cards.onrender.com/'); // AANGEPAST: Redirect naar de nieuwe index.html
     }
 );
 
-app.get('/api/user', (req, res) => {
-    if (req.user) {
+app.get('/api/user', isAuthenticated, async (req, res) => { // Nu alleen toegankelijk voor ingelogde gebruikers
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            return res.status(404).json({ isLoggedIn: false, message: 'Gebruiker niet gevonden.' });
+        }
         res.json({
             isLoggedIn: true,
-            username: req.user.username,
-            twitchId: req.user.twitchId,
-            isAdmin: req.user.isAdmin
+            username: user.username,
+            twitchId: user.twitchId,
+            isAdmin: user.isAdmin,
+            currency: user.currency, // NIEUW: Stuur valuta mee
+            lastPackClaimed: user.lastPackClaimed // NIEUW: Stuur claim tijd mee
         });
-    } else {
-        res.json({ isLoggedIn: false });
+    } catch (err) {
+        console.error('Fout bij ophalen gebruiker via API:', err);
+        res.status(500).json({ isLoggedIn: false, message: 'Interne serverfout bij ophalen gebruiker.' });
     }
 });
+
 
 app.get('/auth/logout', (req, res) => {
     req.logout((err) => {
         if (err) { return next(err); }
-        res.redirect('https://maelmon-trading-cards.onrender.com/'); // Frontend homepage
+        res.redirect('https://maelmon-trading-cards.onrender.com/login.html'); // AANGEPAST: Redirect naar login.html
     });
 });
 
@@ -305,12 +381,89 @@ client.on('message', async (channel, tags, message, self) => {
                 const cardNames = userCards.map(card => card.name).join(', ');
                 client.say(channel, `@${username}, jouw kaarten: ${cardNames}`);
             } else {
-                client.say(channel, `@${username}, je hebt nog geen kaarten.`); // Adminpaneel wordt later gemaakt
+                client.say(channel, `@${username}, je hebt nog geen kaarten.`);
             }
         } catch (error) {
             console.error('Fout bij ophalen eigen kaarten:', error);
             client.say(channel, `@${username}, er ging iets mis bij het ophalen van je kaarten.`);
         }
+    } else if (message.toLowerCase() === '!balance') {
+        try {
+            const user = await User.findOne({ twitchId: twitchId });
+            if (!user) {
+                client.say(channel, `@${username}, om je valuta te zien, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
+                return;
+            }
+            client.say(channel, `@${username}, je hebt ${user.currency} valuta.`);
+        } catch (error) {
+            console.error('Fout bij ophalen valuta:', error);
+            client.say(channel, `@${username}, er ging iets mis bij het ophalen van je valuta.`);
+        }
+    } else if (message.toLowerCase() === '!claim') {
+        try {
+            const user = await User.findOne({ twitchId: twitchId });
+            if (!user) {
+                client.say(channel, `@${username}, om een dagelijks pakketje te claimen, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
+                return;
+            }
+
+            const now = new Date();
+            if (user.lastPackClaimed && (now.getTime() - user.lastPackClaimed.getTime()) < DAILY_PACK_COOLDOWN_MS) {
+                const timeLeft = DAILY_PACK_COOLDOWN_MS - (now.getTime() - user.lastPackClaimed.getTime());
+                const hours = Math.floor(timeLeft / (1000 * 60 * 60));
+                const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
+                client.say(channel, `@${username}, je hebt je dagelijkse pakket al geclaimd. Probeer over ${hours} uur en ${minutes} minuten opnieuw.`);
+                return;
+            }
+
+            const availableCardDefinitions = await Card.find({ ownerId: null });
+            const winnableCards = availableCardDefinitions.filter(card =>
+                card.maxSupply === -1 || card.currentSupply < card.maxSupply
+            );
+
+            if (winnableCards.length === 0) {
+                client.say(channel, `@${username}, er zijn momenteel geen kaarten beschikbaar om te winnen.`);
+                return;
+            }
+
+            const randomIndex = Math.floor(Math.random() * winnableCards.length);
+            const wonCardDefinition = winnableCards[randomIndex];
+
+            const newCardInstance = new Card({
+                name: wonCardDefinition.name,
+                type: wonCardDefinition.type,
+                attack: wonCardDefinition.attack,
+                defense: wonCardDefinition.defense,
+                characterImageUrl: wonCardDefinition.characterImageUrl,
+                backgroundImageUrl: wonCardDefinition.backgroundImageUrl,
+                rarity: wonCardDefinition.rarity,
+                maxSupply: wonCardDefinition.maxSupply,
+                ownerId: user.twitchId
+            });
+
+            wonCardDefinition.currentSupply++;
+
+            await newCardInstance.save();
+            await wonCardDefinition.save();
+
+            user.lastPackClaimed = now;
+            await user.save();
+
+            client.say(channel, `@${username}, gefeliciteerd! Je hebt de kaart "${newCardInstance.name}" gewonnen!`);
+
+        } catch (error) {
+            console.error('Fout bij !claim commando:', error);
+            client.say(channel, `@${username}, er ging iets mis bij het claimen van je dagelijkse pakket.`);
+        }
+    } else if (message.toLowerCase() === '!commands') { // NIEUW: !commands commando
+        const commands = [
+            '!hello (zeg hallo tegen de bot)',
+            '!mycards (zie je verzamelde kaarten)',
+            '!balance (check je valuta)',
+            '!claim (claim je dagelijkse gratis pakketje)',
+            '!commands (zie alle beschikbare commando\'s)'
+        ];
+        client.say(channel, `@${username}, beschikbare commando's: ${commands.join(' | ')}`);
     }
 });
 
