@@ -238,9 +238,8 @@ app.get('/auth/twitch', passport.authenticate('twitch'));
 app.get('/auth/twitch/callback',
     passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }), // Frontend homepage
     function(req, res) {
-        // Na succesvolle login, redirect naar de /dashboard path van de frontend SPA
-        // De frontend (index.html's JS) moet dan de /dashboard path afhandelen
-        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard'); // Dit is de URL van je FRONTEnd service + /dashboard
+        // Na succesvolle login, redirect naar de /dashboard.html path van de frontend
+        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard.html'); // AANGEPAST NAAR .html
     }
 );
 
