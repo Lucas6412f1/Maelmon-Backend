@@ -9,7 +9,6 @@ const tmi = require('tmi.js'); // Voor de Twitch bot
 // NIEUWE IMPORTS VOOR AUTHENTICATIE
 const session = require('express-session');
 const passport = require('passport');
-// >>> BELANGRIJK: Dit is de bijgewerkte import!
 const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy;
 
 
@@ -25,40 +24,43 @@ mongoose.connect(process.env.MONGODB_URI)
     .then(() => console.log('Verbonden met MongoDB Atlas!'))
     .catch(err => console.error('Fout bij verbinden met MongoDB:', err));
 
-// 4. Mongoose Modellen definiëren (Voorbeeld: Card Model)
-// Zorg ervoor dat dit overeenkomt met je bestaande Card model
-// of voeg het hier toe als het nog niet bestaat.
+// 4. Mongoose Modellen definiëren
 const CardSchema = new mongoose.Schema({
     name: { type: String, required: true },
-    type: { type: String, required: true },
+    type: { type: String, required: true }, // Bijvoorbeeld: 'Monster', 'Spell'
     attack: { type: Number, required: true },
     defense: { type: Number, required: true },
-    imageUrl: { type: String, required: true },
+    characterImageUrl: { type: String, required: true }, // De custom foto van het wezen/item
+    backgroundImageUrl: { type: String, required: true }, // De custom achtergrond/frame van de kaart
+    rarity: {
+        type: String,
+        enum: ['Common', 'Uncommon', 'Rare', 'Epic', 'Legendary', 'Unique'],
+        default: 'Common'
+    },
+    maxSupply: { type: Number, default: -1 }, // -1 = onbeperkt, anders een nummer (bijv. 1, 10)
+    currentSupply: { type: Number, default: 0 }, // Hoeveel er van dit type kaart zijn gemaakt
     ownerId: { type: String, default: null } // Twitch user ID van de eigenaar
 });
 const Card = mongoose.model('Card', CardSchema);
 
-// NIEUW: User Model
-// Dit is het model dat gebruikersgegevens opslaat in je MongoDB
 const UserSchema = new mongoose.Schema({
     twitchId: { type: String, required: true, unique: true },
     username: { type: String, required: true },
     email: { type: String, required: false },
     profileImageUrl: { type: String, required: false },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    isAdmin: { type: Boolean, default: false } // Om admins te identificeren
 });
 const User = mongoose.model('User', UserSchema);
 
 
 // 5. Middleware configureren
-// CORS instellingen
 app.use(cors({
     origin: ['https://maelmon-trading-cards.onrender.com', 'http://localhost:3000'],
     credentials: true
 }));
 app.use(express.json());
 
-// NIEUW: Express Session middleware
 app.use(session({
     secret: process.env.SESSION_SECRET,
     resave: false,
@@ -70,7 +72,6 @@ app.use(session({
     }
 }));
 
-// NIEUW: Initialiseer Passport
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -78,35 +79,33 @@ app.use(passport.session());
 passport.use(new TwitchStrategy({
     clientID: process.env.TWITCH_CLIENT_ID,
     clientSecret: process.env.TWITCH_CLIENT_SECRET,
-    // >>> BELANGRIJK: Dit is de URL van JE BACKEND SERVICE!
-    // >>> Deze moet EXACT OVEREENKOMEN met de Redirect URL in je Twitch Dev Console!
     callbackURL: "https://maelmon-backend.onrender.com/auth/twitch/callback",
-    scope: "user:read:email", // Scopes die je wilt aanvragen van de gebruiker
+    scope: "user:read:email",
 },
 function(accessToken, refreshToken, profile, done) {
-    // Deze functie wordt aangeroepen na succesvolle authenticatie bij Twitch
-    // 'profile' bevat de gebruikersinformatie van Twitch
-    // Hier moet je de gebruiker opslaan of vinden in je eigen database (MongoDB)
-
     User.findOne({ twitchId: profile.id })
         .then(currentUser => {
             if (currentUser) {
-                // Gebruiker bestaat al, return die gebruiker
                 console.log(`Gebruiker ${currentUser.username} al bekend, ingelogd.`);
                 done(null, currentUser);
             } else {
                 // Nieuwe gebruiker, maak een nieuw record aan
+                // === BEGIN WIJZIGING (isAdmin automatisch toewijzen) ===
+                const isNewAdmin = (profile.display_name === 'Lucas6412TM' || profile.display_name === 'maelsethe420');
+
                 new User({
                     twitchId: profile.id,
                     username: profile.display_name,
                     email: profile.email,
-                    profileImageUrl: profile.profile_image_url
+                    profileImageUrl: profile.profile_image_url,
+                    isAdmin: isNewAdmin // Hier wordt de isAdmin status ingesteld
                 }).save()
                   .then(newUser => {
-                      console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen.`);
+                      console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen. Admin status: ${newUser.isAdmin}`);
                       done(null, newUser);
                   })
                   .catch(err => done(err));
+                // === EINDE WIJZIGING ===
             }
         })
         .catch(err => done(err));
@@ -126,6 +125,22 @@ passport.deserializeUser((id, done) => {
         .catch(err => done(err));
 });
 
+// Middleware om te controleren of de gebruiker is ingelogd
+function isAuthenticated(req, res, next) {
+    if (req.isAuthenticated()) { // Passport voegt isAuthenticated() toe aan req
+        return next();
+    }
+    res.status(401).json({ message: 'Niet geauthenticeerd.' });
+}
+
+// Middleware om te controleren of de gebruiker een admin is
+function isAdmin(req, res, next) {
+    if (req.isAuthenticated() && req.user.isAdmin) {
+        return next();
+    }
+    res.status(403).json({ message: 'Toegang geweigerd. Alleen admins.' });
+}
+
 
 // 8. API Routes
 app.get('/api/cards', async (req, res) => {
@@ -138,33 +153,122 @@ app.get('/api/cards', async (req, res) => {
     }
 });
 
-// NIEUWE AUTHENTICATIE ROUTES
-// Route om de OAuth-flow te starten (login met Twitch)
+// NIEUWE ADMIN ROUTE: Kaarten toevoegen
+app.post('/api/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
+    try {
+        // We verwachten dat de frontend de volgende data stuurt
+        const {
+            name,
+            type,
+            attack,
+            defense,
+            characterImageUrl,
+            backgroundImageUrl,
+            rarity,
+            maxSupply // Wordt gebruikt voor de definitie
+        } = req.body;
+
+        // Validatie (eenvoudig, je kunt dit uitbreiden)
+        if (!name || !type || !attack || !defense || !characterImageUrl || !backgroundImageUrl || !rarity) {
+            return res.status(400).json({ message: 'Alle verplichte kaartvelden moeten worden ingevuld.' });
+        }
+        if (isNaN(attack) || isNaN(defense)) {
+            return res.status(400).json({ message: 'Attack en Defense moeten nummers zijn.' });
+        }
+        if (maxSupply !== undefined && maxSupply !== null && isNaN(parseInt(maxSupply))) {
+             return res.status(400).json({ message: 'Max Supply moet een nummer zijn (-1 voor onbeperkt).' });
+        }
+
+        let finalMaxSupply = -1; // Default naar onbeperkt
+        if (maxSupply !== undefined && maxSupply !== null) {
+            finalMaxSupply = parseInt(maxSupply);
+            if (finalMaxSupply < -1) {
+                return res.status(400).json({ message: 'Max Supply kan niet negatief zijn (behalve -1 voor onbeperkt).' });
+            }
+        }
+
+        // --- Logica voor maxSupply en currentSupply ---
+        // We zoeken een bestaande kaart "definitie" op basis van naam, type en zeldzaamheid.
+        // Als je wilt dat bv. "Blue Dragon Rare" en "Blue Dragon Common" afzonderlijke supplies hebben,
+        // dan moet de combinatie van deze velden uniek zijn voor een 'kaartdefinitie'.
+        let existingCardDefinition = await Card.findOne({ name, type, rarity, ownerId: null }); // ownerId: null om definities te onderscheiden van bezeten kaarten
+
+        let cardToSave; // Dit zal de kaartinstantie zijn die we opslaan
+
+        if (existingCardDefinition) {
+            // Kaartdefinitie bestaat al
+            if (existingCardDefinition.maxSupply !== -1 && existingCardDefinition.currentSupply >= existingCardDefinition.maxSupply) {
+                return res.status(400).json({ message: `Maximum aantal van deze kaartdefinitie ("${name}" - ${rarity}) is bereikt.` });
+            }
+
+            // Verhoog de teller van de bestaande definitie
+            existingCardDefinition.currentSupply++;
+            await existingCardDefinition.save();
+
+            // Creëer een nieuwe INSTANTIE van deze kaart (deze krijgt een eigen _id)
+            cardToSave = new Card({
+                name,
+                type,
+                attack: parseInt(attack),
+                defense: parseInt(defense),
+                characterImageUrl,
+                backgroundImageUrl,
+                rarity,
+                // maxSupply en currentSupply worden beheerd door de 'definitie'
+                maxSupply: existingCardDefinition.maxSupply, // Neem de maxSupply over van de definitie
+                currentSupply: existingCardDefinition.currentSupply, // Neem de geüpdatete currentSupply over
+                ownerId: null // Deze kaartinstantie is nog niet van iemand
+            });
+
+        } else {
+            // Kaartdefinitie bestaat nog niet, maak een nieuwe definitie én de eerste instantie aan
+            cardToSave = new Card({
+                name,
+                type,
+                attack: parseInt(attack),
+                defense: parseInt(defense),
+                characterImageUrl,
+                backgroundImageUrl,
+                rarity,
+                maxSupply: finalMaxSupply, // Gebruik de opgegeven maxSupply
+                currentSupply: 1, // Dit is de eerste instantie
+                ownerId: null // Deze kaartinstantie is nog niet van iemand
+            });
+        }
+
+        await cardToSave.save(); // Sla de nieuwe kaartinstantie op
+        res.status(201).json({ message: 'Kaart succesvol toegevoegd.', card: cardToSave });
+
+    } catch (err) {
+        console.error('Fout bij toevoegen kaart via admin:', err);
+        res.status(500).json({ message: 'Interne serverfout bij toevoegen kaart.' });
+    }
+});
+
+
+// AUTHENTICATIE ROUTES
 app.get('/auth/twitch', passport.authenticate('twitch'));
 
-// Callback route na authenticatie bij Twitch
 app.get('/auth/twitch/callback',
-    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }), // Redirect naar homepage frontend bij falen
+    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }),
     function(req, res) {
-        // Succesvolle authenticatie, redirect naar een dashboard of profielpagina op je frontend
-        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard'); // Of een andere relevante pagina op je frontend
+        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard');
     }
 );
 
-// Optionele route om de ingelogde gebruiker te testen
 app.get('/api/user', (req, res) => {
     if (req.user) {
         res.json({
             isLoggedIn: true,
             username: req.user.username,
             twitchId: req.user.twitchId,
+            isAdmin: req.user.isAdmin
         });
     } else {
         res.json({ isLoggedIn: false });
     }
 });
 
-// Route om uit te loggen
 app.get('/auth/logout', (req, res) => {
     req.logout((err) => {
         if (err) { return next(err); }
@@ -199,39 +303,9 @@ client.on('message', async (channel, tags, message, self) => {
     const username = tags['display-name'];
     const twitchId = tags['user-id'];
 
-    if (message.toLowerCase().startsWith('!addcard ')) {
-        const args = message.slice('!addcard '.length).split(',');
+    // !addcard commando is verwijderd zoals gevraagd
 
-        if (args.length === 5) {
-            const [name, type, attack, defense, imageUrl] = args.map(arg => arg.trim());
-
-            try {
-                const user = await User.findOne({ twitchId: twitchId });
-
-                if (!user) {
-                    client.say(channel, `@${username}, om kaarten toe te voegen, moet je eerst je Twitch-account koppelen op onze website: https://maelmon-trading-cards.onrender.com/login`);
-                    return;
-                }
-
-                const newCard = new Card({
-                    name,
-                    type,
-                    attack: parseInt(attack),
-                    defense: parseInt(defense),
-                    imageUrl,
-                    ownerId: user.twitchId
-                });
-
-                await newCard.save();
-                client.say(channel, `@${username}, kaart "${name}" succesvol toegevoegd aan je collectie!`);
-            } catch (error) {
-                console.error('Fout bij toevoegen kaart:', error);
-                client.say(channel, `@${username}, er ging iets mis bij het toevoegen van de kaart. Controleer het formaat: !addcard Naam,Type,Attack,Defense,ImageURL`);
-            }
-        } else {
-            client.say(channel, `@${username}, Gebruik: !addcard Naam,Type,Attack,Defense,ImageURL`);
-        }
-    } else if (message.toLowerCase() === '!hello') {
+    if (message.toLowerCase() === '!hello') {
         client.say(channel, `Hello, @${username}!`);
     } else if (message.toLowerCase() === '!mycards') {
         try {
@@ -245,7 +319,7 @@ client.on('message', async (channel, tags, message, self) => {
                 const cardNames = userCards.map(card => card.name).join(', ');
                 client.say(channel, `@${username}, jouw kaarten: ${cardNames}`);
             } else {
-                client.say(channel, `@${username}, je hebt nog geen kaarten. Voeg er een toe met !addcard.`);
+                client.say(channel, `@${username}, je hebt nog geen kaarten. Voeg er een toe via het adminpaneel.`);
             }
         } catch (error) {
             console.error('Fout bij ophalen eigen kaarten:', error);
