@@ -238,8 +238,9 @@ app.get('/auth/twitch', passport.authenticate('twitch'));
 app.get('/auth/twitch/callback',
     passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }), // Frontend homepage
     function(req, res) {
-        // Na succesvolle login, redirect naar de dashboard HTML pagina van de frontend
-        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard.html'); // HIER WIJZIG JE DE URL NAAR JE FRONTEnd service
+        // Na succesvolle login, redirect naar de /dashboard path van de frontend SPA
+        // De frontend (index.html's JS) moet dan de /dashboard path afhandelen
+        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard'); // Dit is de URL van je FRONTEnd service + /dashboard
     }
 );
 
@@ -296,7 +297,8 @@ client.on('message', async (channel, tags, message, self) => {
         try {
             const user = await User.findOne({ twitchId: twitchId });
             if (!user) {
-                client.say(channel, `@${username}, om je kaarten te zien, moet je eerst je Twitch-account koppelen op onze website: https://maelmon-trading-cards.onrender.com/`); // Homepage van de frontend
+                // Link direct naar de backend login endpoint zoals gevraagd
+                client.say(channel, `@${username}, om je kaarten te zien, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
                 return;
             }
             const userCards = await Card.find({ ownerId: user.twitchId });
@@ -304,7 +306,7 @@ client.on('message', async (channel, tags, message, self) => {
                 const cardNames = userCards.map(card => card.name).join(', ');
                 client.say(channel, `@${username}, jouw kaarten: ${cardNames}`);
             } else {
-                client.say(channel, `@${username}, je hebt nog geen kaarten. Voeg er een toe via het adminpaneel.`);
+                client.say(channel, `@${username}, je hebt nog geen kaarten.`); // Adminpaneel wordt later gemaakt
             }
         } catch (error) {
             console.error('Fout bij ophalen eigen kaarten:', error);
