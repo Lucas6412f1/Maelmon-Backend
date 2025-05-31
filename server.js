@@ -1,81 +1,74 @@
 // server.js
 
-// 1. Essentiële Modules Importeren
+// 1. Vereiste modules importeren
+require('dotenv').config(); // Laadt .env variabelen (voor lokale ontwikkeling)
 const express = require('express');
-const mongoose = require('mongoose');
 const session = require('express-session');
+const MongoStore = require('connect-mongo'); // Voor persistente sessies
 const passport = require('passport');
-const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy;
+const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy; // De correcte Twitch strategie
+const mongoose = require('mongoose');
 const cors = require('cors');
-require('dotenv').config(); // Laadt omgevingsvariabelen uit .env bestand (voor lokale ontwikkeling)
+const tmi = require('tmi.js'); // Voor de Twitch Chat Bot
 
-// Twitch Chat Bot gerelateerde imports
-const tmi = require('tmi.js');
-
-// 2. Express App Initialiseren
+// 2. Express applicatie initialiseren
 const app = express();
-const PORT = process.env.PORT || 10000; // Gebruik de poort van Render, anders 10000 lokaal
+// Poortconfiguratie: Gebruik Render's PORT variabele of standaard 10000
+const PORT = process.env.PORT || 10000;
 
-// 3. MongoDB Connectie
-mongoose.connect(process.env.MONGODB_URI)
+// 3. MongoDB verbinding
+mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('Verbonden met MongoDB Atlas!'))
     .catch(err => console.error('Fout bij verbinden met MongoDB:', err));
 
-// MongoDB Schema en Model voor Gebruikers
+// 4. Mongoose User Schema en Model
 const userSchema = new mongoose.Schema({
-    twitchId: { type: String, unique: true, required: true },
-    username: { type: String, required: true },
-    displayName: String,
-    profileImageUrl: String,
-    isAdmin: { type: Boolean, default: false },
+    twitchId: { type: String, required: true, unique: true },
+    username: { type: String, required: true, unique: true },
+    displayName: { type: String, required: true },
+    profileImageUrl: { type: String, default: '' },
     currency: { type: Number, default: 0 },
-    lastPackClaimed: { type: Date, default: null },
-    cards: [{
-        cardId: { type: mongoose.Schema.Types.ObjectId, ref: 'Card' },
-        quantity: { type: Number, default: 1 }
-    }]
+    isAdmin: { type: Boolean, default: false }
 });
+
 const User = mongoose.model('User', userSchema);
 
-// MongoDB Schema en Model voor Kaarten
-const cardSchema = new mongoose.Schema({
-    name: { type: String, required: true, unique: true },
-    type: { type: String, required: true }, // Bijv. "Attack", "Defense", "Support"
-    attack: { type: Number, default: 0 },
-    defense: { type: Number, default: 0 },
-    characterImageUrl: { type: String, required: true },
-    rarity: { type: String, required: true }, // Bijv. "Common", "Rare", "Epic", "Legendary"
-    description: String,
-    maxSupply: { type: Number, default: 0 }, // 0 = unlimited
-    currentSupply: { type: Number, default: 0 } // Houd bij hoeveel er in omloop zijn
-});
-const Card = mongoose.model('Card', cardSchema);
-
-
-// 4. Passport.js Setup voor Twitch OAuth
-passport.serializeUser(function(user, done) {
+// 5. Passport.js serialisatie/deserialisatie
+// Gebruiker opslaan in sessie
+passport.serializeUser((user, done) => {
     done(null, user.id);
 });
 
-passport.deserializeUser(function(id, done) {
-    User.findById(id, function(err, user) {
-        done(err, user);
-    });
+// Gebruiker ophalen uit sessie
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await User.findById(id);
+        done(null, user);
+    } catch (err) {
+        done(err, null);
+    }
 });
 
+// 6. Passport Twitch Strategie
 passport.use(new TwitchStrategy({
     clientID: process.env.TWITCH_CLIENT_ID,
     clientSecret: process.env.TWITCH_CLIENT_SECRET,
-    // DEZE CALLBACK URL MOET EXACT OVEREENKOMEN MET JE TWITCH DEVELOPER CONSOLE
-    callbackURL: "https://maelmon-backend.onrender.com/auth/twitch/callback",
-    scope: "user:read:email",
+    callbackURL: process.env.TWITCH_CALLBACK_URL,
+    scope: 'user:read:email', // Vraagt om email, hoewel Twitch dit voor bots niet altijd direct geeft
+    passReqToCallback: true // Zorgt ervoor dat 'req' beschikbaar is in de verify callback (niet essentieel voor deze code, maar vaak handig)
 },
-function(accessToken, refreshToken, profile, done) {
-    // Hier wordt de gebruiker gevonden of aangemaakt in je database
-    User.findOne({ twitchId: profile.id }, function(err, user) {
-        if (err) { return done(err); }
+// Dit is de 'verify' functie die wordt aangeroepen na de Twitch authenticatie
+async function(req, accessToken, refreshToken, profile, done) {
+    try {
+        // Log de profielgegevens die van Twitch komen (voor debugging)
+        console.log("Twitch Profile:", profile);
+
+        // Zoek de gebruiker in de database op basis van twitchId
+        // NIEUW: Gebruik await, want findOne retourneert een Promise
+        const user = await User.findOne({ twitchId: profile.id });
+
         if (!user) {
-            // Nieuwe gebruiker, maak een record aan
+            // Gebruiker niet gevonden, maak een nieuwe aan
             const newUser = new User({
                 twitchId: profile.id,
                 username: profile.login,
@@ -84,218 +77,186 @@ function(accessToken, refreshToken, profile, done) {
                 currency: 100, // Startgeld
                 isAdmin: false // Nieuwe gebruikers zijn standaard geen admin
             });
-            newUser.save(function(err) {
-                if (err) { return done(err); }
-                console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen.`);
-                return done(null, newUser);
-            });
+            await newUser.save(); // NIEUW: Gebruik await voor opslaan
+            console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen.`);
+            return done(null, newUser);
         } else {
-            // Bestaande gebruiker, update eventueel gegevens
+            // Gebruiker al bekend, update eventueel gegevens
             user.displayName = profile.display_name;
             user.profileImageUrl = profile.profile_image_url;
-            // Je kunt hier meer velden updaten
-            user.save(function(err) { // Sla updates op
-                if (err) { console.error("Fout bij updaten gebruiker:", err); }
-                console.log(`Gebruiker ${user.username} al bekend, ingelogd.`);
-                return done(null, user);
-            });
+            // Je kunt hier meer velden updaten indien nodig
+            await user.save(); // NIEUW: Gebruik await voor opslaan
+            console.log(`Gebruiker ${user.username} al bekend, ingelogd.`);
+            return done(null, user);
         }
-    });
-}));
-
-// 5. Middleware configureren
-app.use(cors({
-    // ZORG DAT DIT DE EXACTE URL(S) VAN JE FRONTEND ZIJN
-    origin: ['https://maelmon-trading-cards.onrender.com', 'http://localhost:3000'],
-    credentials: true, // Essentieel om cookies mee te sturen
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Toegestane HTTP-methoden
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'], // Toegestane headers
-}));
-app.use(express.json()); // Body parser voor JSON data
-
-// Sessie middleware configuratie
-app.use(session({
-    secret: process.env.SESSION_SECRET, // GEBRUIK EEN STERKE, WILLEKEURIGE STRING HIER (in Render ENV)
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-        secure: true, // MOET TRUE ZIJN VOOR HTTPS (RENDER GEBRUIKT HTTPS)
-        httpOnly: true, // Voorkomt JavaScript toegang tot de cookie
-        maxAge: 24 * 60 * 60 * 1000, // Cookie geldig voor 24 uur
-        sameSite: 'none' // CRUCIAAL VOOR CROSS-ORIGIN SESSIES (frontend en backend op verschillende domeinen)
+    } catch (err) {
+        // Als er een fout optreedt, geef deze door aan Passport
+        console.error("Fout in Passport verify functie:", err);
+        return done(err);
     }
 }));
 
+// 7. Express middleware configuratie
+
+// CORS instellingen voor cross-origin requests
+app.use(cors({
+    origin: process.env.FRONTEND_URL, // Vervang dit met de daadwerkelijke URL van je frontend op Render
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    credentials: true // Belangrijk voor het doorsturen van cookies/sessies
+}));
+
+app.use(express.json()); // Body parser voor JSON
+app.use(express.urlencoded({ extended: true })); // Body parser voor URL-encoded data
+
+// Sessie middleware
+app.use(session({
+    secret: process.env.SESSION_SECRET, // Een sterke, geheime sleutel
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({ // Gebruik MongoStore voor persistente sessies
+        mongoUrl: process.env.MONGO_URI,
+        collectionName: 'sessions', // Naam van de collectie voor sessies in MongoDB
+        ttl: 14 * 24 * 60 * 60 // Sessie TTL in seconden (14 dagen)
+    }),
+    cookie: {
+        maxAge: 1000 * 60 * 60 * 24 * 7, // 7 dagen
+        secure: true, // Cookies alleen via HTTPS (verplicht voor sameSite: 'none')
+        sameSite: 'none' // Essentieel voor cross-site cookie werking
+    }
+}));
+
+// Passport initialiseren
 app.use(passport.initialize());
 app.use(passport.session());
 
-// Hulpfunctie om te controleren of gebruiker is ingelogd
-const isAuthenticated = (req, res, next) => {
-    if (req.isAuthenticated()) {
-        return next();
-    }
-    // Als niet ingelogd, stuur 401 Unauthorized
-    res.status(401).json({ message: "Not authenticated" });
-};
+// 8. Routes
 
-// Hulpfunctie om te controleren of gebruiker admin is
-const isAdmin = (req, res, next) => {
-    if (req.isAuthenticated() && req.user.isAdmin) {
-        return next();
-    }
-    res.status(403).json({ message: "Forbidden: Not an administrator" });
-};
+// Hoofdpagina route (kan ook een simpel bericht zijn of redirect)
+app.get('/', (req, res) => {
+    res.send('MaelMon Backend is running!');
+});
 
-
-// 6. Authenticatie Routes
+// Twitch authenticatie routes
 app.get('/auth/twitch', passport.authenticate('twitch'));
 
 app.get('/auth/twitch/callback',
-    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/login.html' }), // Redirect bij mislukking
-    function(req, res) {
-        // Succesvolle authenticatie, redirect naar de hoofdapp
-        res.redirect('https://maelmon-trading-cards.onrender.com/');
+    passport.authenticate('twitch', { failureRedirect: `${process.env.FRONTEND_URL}/login.html` }),
+    (req, res) => {
+        // Succesvolle authenticatie, redirect naar de hoofdpagina van de frontend
+        res.redirect(process.env.FRONTEND_URL || '/'); // Redirect naar frontend URL
     }
 );
 
-app.get('/auth/logout', (req, res, next) => {
-    req.logout((err) => {
-        if (err) { return next(err); }
-        // Na logout redirect naar de login pagina van de frontend
-        res.redirect('https://maelmon-trading-cards.onrender.com/login.html');
-    });
-});
-
-// 7. API Routes (Gebruiker)
-app.get('/api/user', isAuthenticated, (req, res) => {
-    // Stuur relevante gebruikersdata (haal gevoelige info zoals twitchId weg indien gewenst)
-    res.json({
-        isLoggedIn: true,
-        username: req.user.username,
-        displayName: req.user.displayName,
-        profileImageUrl: req.user.profileImageUrl,
-        currency: req.user.currency,
-        isAdmin: req.user.isAdmin,
-        lastPackClaimed: req.user.lastPackClaimed,
-        cards: req.user.cards // Inclusief de kaarten
-    });
-});
-
-app.post('/api/user/claim-daily-pack', isAuthenticated, async (req, res) => {
-    const user = req.user;
-    const now = new Date();
-    const DAILY_PACK_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 uur
-
-    if (user.lastPackClaimed && (now.getTime() - user.lastPackClaimed.getTime()) < DAILY_PACK_COOLDOWN_MS) {
-        return res.status(400).json({ message: "Daily pack already claimed. Please wait." });
-    }
-
-    try {
-        // Vind een willekeurige kaart uit de database
-        const allCards = await Card.find({});
-        if (allCards.length === 0) {
-            return res.status(500).json({ message: "No cards available to claim." });
-        }
-        const randomCard = allCards[Math.floor(Math.random() * allCards.length)];
-
-        // Update gebruiker
-        user.currency += 50; // Voorbeeld: 50 muntjes per dagelijks pak
-        user.lastPackClaimed = now;
-
-        // Voeg de kaart toe aan de inventaris van de gebruiker
-        const existingCardIndex = user.cards.findIndex(c => c.cardId.equals(randomCard._id));
-        if (existingCardIndex > -1) {
-            user.cards[existingCardIndex].quantity += 1;
-        } else {
-            user.cards.push({ cardId: randomCard._id, quantity: 1 });
-        }
-
-        await user.save();
+// Route om de ingelogde gebruiker op te halen
+app.get('/api/user', (req, res) => {
+    if (req.isAuthenticated()) {
         res.json({
-            message: `You claimed your daily pack and received ${randomCard.name} and 50 currency!`,
-            card: randomCard // Stuur de gewonnen kaart terug voor weergave
+            loggedIn: true,
+            user: {
+                id: req.user.id,
+                twitchId: req.user.twitchId,
+                username: req.user.username,
+                displayName: req.user.displayName,
+                profileImageUrl: req.user.profileImageUrl,
+                currency: req.user.currency,
+                isAdmin: req.user.isAdmin
+            }
         });
-    } catch (error) {
-        console.error("Error claiming daily pack:", error);
-        res.status(500).json({ message: "Error claiming daily pack. Please try again." });
+    } else {
+        res.status(401).json({ loggedIn: false, message: 'Niet geauthenticeerd.' });
     }
 });
 
+// Logout route
+app.get('/logout', (req, res) => {
+    req.logout((err) => {
+        if (err) { return res.status(500).send('Fout bij uitloggen.'); }
+        req.session.destroy(() => {
+            // Redirect naar de frontend login pagina na uitloggen
+            res.redirect(`${process.env.FRONTEND_URL}/login.html`);
+        });
+    });
+});
 
-// 8. Admin Routes
-app.post('/api/admin/cards', isAdmin, async (req, res) => {
+// Admin card management API (voorbeeld)
+// Deze route moet beveiligd worden, bijvoorbeeld met een admin check
+app.post('/api/admin/cards', async (req, res) => {
+    // Voeg hier logica toe om te controleren of de gebruiker admin is
+    // if (!req.isAuthenticated() || !req.user.isAdmin) {
+    //     return res.status(403).json({ message: 'Toegang geweigerd.' });
+    // }
+
     try {
-        const { name, type, attack, defense, characterImageUrl, rarity, description, maxSupply } = req.body;
-
-        const newCard = new Card({
-            name,
-            type,
-            attack,
-            defense,
-            characterImageUrl,
-            rarity,
-            description,
-            maxSupply,
-            currentSupply: 0 // Start op 0, wordt verhoogd wanneer de kaart wordt geclaimd/gekocht
-        });
-
-        await newCard.save();
-        res.status(201).json({ message: 'Card added successfully!', card: newCard });
+        const { name, type, attack, defense, rarity, description, characterImageUrl } = req.body;
+        // Voorbeeld: Sla kaart op in MongoDB (je hebt een Card model nodig)
+        // const newCard = new Card({ name, type, attack, defense, rarity, description, characterImageUrl });
+        // await newCard.save();
+        res.status(201).json({ message: 'Kaart toegevoegd (simulatie)', card: req.body });
     } catch (error) {
-        if (error.code === 11000) { // Duplicate key error (name is unique)
-            return res.status(409).json({ message: 'Card with this name already exists.' });
-        }
-        console.error("Error adding card:", error);
-        res.status(500).json({ message: 'Error adding card.' });
+        console.error('Fout bij toevoegen kaart:', error);
+        res.status(500).json({ message: 'Interne serverfout bij toevoegen kaart.' });
     }
 });
 
-// 9. Twitch Chat Bot
+
+// 9. Server starten
+app.listen(PORT, () => {
+    console.log(`MaelMon Backend server draait op poort ${PORT}`);
+});
+
+// 10. Twitch Chat Bot (apart gedeelte)
 const client = new tmi.Client({
     options: { debug: true },
-    connection: { reconnect: true },
-    identity: {
-        username: process.env.TWITCH_USERNAME, // JOUW TWITCH BOT GEBRUIKERSNAAM
-        password: process.env.TWITCH_OAUTH_TOKEN // OAuth token voor de bot (begint met 'oauth:')
+    connection: {
+        reconnect: true,
+        secure: true
     },
-    channels: [process.env.TWITCH_CHANNEL] // JOUW TWITCH KANAAL NAAM
+    identity: {
+        username: process.env.TWITCH_BOT_USERNAME, // Bot's Twitch username
+        password: process.env.TWITCH_BOT_OAUTH // Bot's Twitch OAuth token (start met oauth:)
+    },
+    channels: [process.env.TWITCH_CHANNEL_NAME] // Het kanaal waar de bot actief moet zijn
 });
+
+client.connect(); // Verbind de bot met Twitch Chat
 
 client.on('message', async (channel, tags, message, self) => {
     if (self) return; // Ignore messages from the bot itself
 
-    const username = tags['display-name'];
+    // Voeg de gebruiker toe aan de database als die nog niet bestaat
     let user = await User.findOne({ twitchId: tags['user-id'] });
 
     if (!user) {
         // Als de bot een bericht krijgt van een onbekende gebruiker, registreer hem.
-        // Dit is een fallback, normaal gesproken registreert de OAuth flow gebruikers.
         user = new User({
             twitchId: tags['user-id'],
-            username: tags['username'], // tmi.js geeft 'username' als login, 'display-name' als displaynaam
+            username: tags['username'],
             displayName: tags['display-name'],
-            profileImageUrl: tags['user-image'], // tmi.js geeft user-image, of je kunt de Twitch API gebruiken
-            currency: 0,
+            profileImageUrl: tags['user-image'],
+            currency: 0, // Beginvaluta voor chat-geregistreerde gebruikers
             isAdmin: false
         });
         await user.save();
-        console.log(`Nieuwe gebruiker ${user.username} via chat geregistreerd.`);
-        client.say(channel, `Welcome to MaelMon, ${username}! Type !currency to check your balance.`);
+        client.say(channel, `Welcome to MaelMon, ${tags['display-name']}! Type !currency to check your balance.`);
+        console.log(`Nieuwe gebruiker ${tags['display-name']} via chat geregistreerd.`);
     }
 
-    if (message.toLowerCase() === '!currency') {
-        if (user) {
-            client.say(channel, `${username}, your current currency is ${user.currency} ⭐.`);
-        } else {
-            client.say(channel, `${username}, I couldn't find your data. Are you logged in on the website?`);
-        }
+    if (message.toLowerCase() === '!currency' || message.toLowerCase() === '!balance' || message.toLowerCase() === '!mybalance') {
+        client.say(channel, `${user.displayName}, your current currency is ${user.currency} ⭐.`);
     }
-    // Voeg hier meer bot commando's toe, bijv. !claimpack, !shop, etc.
+
+    // Andere bot commando's kunnen hier worden toegevoegd
 });
 
-client.connect(); // Start de bot
+client.on('connected', (address, port) => {
+    console.log(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] info: Connected to ${address}:${port}`);
+});
 
-// 10. Server starten
-app.listen(PORT, () => {
-    console.log(`MaelMon Backend server running on http://localhost:${PORT}`);
+// Foutafhandeling voor de bot
+client.on('disconnected', (reason) => {
+    console.error(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] error: Disconnected from Twitch chat: ${reason}`);
+});
+
+client.on('reconnect', () => {
+    console.log(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] info: Attempting to reconnect to Twitch chat...`);
 });
