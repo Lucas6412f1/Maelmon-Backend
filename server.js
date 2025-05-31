@@ -5,7 +5,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const session = require('express-session');
 const passport = require('passport');
-const TwitchStrategy = require('passport-twitch').Strategy;
+const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy;
 const cors = require('cors');
 require('dotenv').config(); // Laadt omgevingsvariabelen uit .env bestand (voor lokale ontwikkeling)
 
