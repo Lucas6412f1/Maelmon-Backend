@@ -139,7 +139,7 @@ function isAdmin(req, res, next) {
     if (req.isAuthenticated() && req.user.isAdmin) {
         return next();
     }
-    res.status(403).json({ message: 'Toegang geweigerd. Alleen admins.' });
+    res.status(403).json({ message: 'access denied. Admins only here sucker. Get outta here.' });
 }
 
 
@@ -182,7 +182,7 @@ app.post('/api/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
         if (maxSupply !== undefined && maxSupply !== null) {
             finalMaxSupply = parseInt(maxSupply);
             if (finalMaxSupply < -1) {
-                return res.status(400).json({ message: 'Max Supply kan niet negatief zijn (behalve -1 voor onbeperkt).' });
+                return res.status(400).json({ message: 'Max supply can not be negative (except -1 for unlimited).' });
             }
         }
 
@@ -192,7 +192,7 @@ app.post('/api/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
 
         if (existingCardDefinition) {
             if (existingCardDefinition.maxSupply !== -1 && existingCardDefinition.currentSupply >= existingCardDefinition.maxSupply) {
-                return res.status(400).json({ message: `Maximum aantal van deze kaartdefinitie ("${name}" - ${rarity}) is bereikt.` });
+                return res.status(400).json({ message: `Maximum supply of this card definition ("${name}" - ${rarity}) has been reached.` });
             }
 
             existingCardDefinition.currentSupply++;
@@ -227,11 +227,11 @@ app.post('/api/admin/cards', isAuthenticated, isAdmin, async (req, res) => {
         }
 
         await cardToSave.save();
-        res.status(201).json({ message: 'Kaart succesvol toegevoegd.', card: cardToSave });
+        res.status(201).json({ message: 'Card successfully added to database.', card: cardToSave });
 
     } catch (err) {
         console.error('Fout bij toevoegen kaart via admin:', err);
-        res.status(500).json({ message: 'Interne serverfout bij toevoegen kaart.' });
+        res.status(500).json({ message: 'Internal server error.' });
     }
 });
 
@@ -246,13 +246,13 @@ app.post('/api/user/claim-daily-pack', isAuthenticated, async (req, res) => {
             const timeLeft = DAILY_PACK_COOLDOWN_MS - (now.getTime() - user.lastPackClaimed.getTime());
             const hours = Math.floor(timeLeft / (1000 * 60 * 60));
             const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
-            return res.status(400).json({ message: `Je hebt je dagelijkse pakket al geclaimd. Probeer over ${hours} uur en ${minutes} minuten opnieuw.` });
+            return res.status(400).json({ message: `You have already claimed your daily pack. Try again in ${hours} hours and ${minutes} minutes.` });
         }
 
         // Haal alle beschikbare kaartdefinities op (kaarten zonder eigenaarId, of templates)
         const availableCardDefinitions = await Card.find({ ownerId: null });
         if (availableCardDefinitions.length === 0) {
-            return res.status(404).json({ message: 'Geen kaarten beschikbaar om te winnen.' });
+            return res.status(404).json({ message: 'no cards available for claim.' });
         }
 
         // Filter kaarten die hun maxSupply bereikt hebben
@@ -261,7 +261,7 @@ app.post('/api/user/claim-daily-pack', isAuthenticated, async (req, res) => {
         );
 
         if (winnableCards.length === 0) {
-            return res.status(400).json({ message: 'Alle beschikbare kaarten hebben hun maximale voorraad bereikt.' });
+            return res.status(400).json({ message: 'All available cards have been claimed.' });
         }
 
         // Selecteer een willekeurige kaart uit de winbare kaarten
@@ -292,7 +292,7 @@ app.post('/api/user/claim-daily-pack', isAuthenticated, async (req, res) => {
         user.lastPackClaimed = now;
         await user.save();
 
-        res.status(200).json({ message: 'Gefeliciteerd! Je hebt een kaart gewonnen!', card: newCardInstance });
+        res.status(200).json({ message: 'congrats, you won a new card!', card: newCardInstance });
 
     } catch (err) {
         console.error('Fout bij claimen dagelijks pakket:', err);
@@ -373,37 +373,37 @@ client.on('message', async (channel, tags, message, self) => {
             const user = await User.findOne({ twitchId: twitchId });
             if (!user) {
                 // Link direct naar de backend login endpoint zoals gevraagd
-                client.say(channel, `@${username}, om je kaarten te zien, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
+                client.say(channel, `@${username}, to see your cards, you must first log in https://maelmon-backend.onrender.com/auth/twitch`);
                 return;
             }
             const userCards = await Card.find({ ownerId: user.twitchId });
             if (userCards.length > 0) {
                 const cardNames = userCards.map(card => card.name).join(', ');
-                client.say(channel, `@${username}, jouw kaarten: ${cardNames}`);
+                client.say(channel, `@${username}, your cards are: ${cardNames}`);
             } else {
-                client.say(channel, `@${username}, je hebt nog geen kaarten.`);
+                client.say(channel, `@${username}, you have no cards yet.`);
             }
         } catch (error) {
             console.error('Fout bij ophalen eigen kaarten:', error);
-            client.say(channel, `@${username}, er ging iets mis bij het ophalen van je kaarten.`);
+            client.say(channel, `@${username}, something went wrong while fetching your cards.`);
         }
     } else if (message.toLowerCase() === '!balance') {
         try {
             const user = await User.findOne({ twitchId: twitchId });
             if (!user) {
-                client.say(channel, `@${username}, om je valuta te zien, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
+                client.say(channel, `@${username}, to see your balance, you must first log in: https://maelmon-backend.onrender.com/auth/twitch`);
                 return;
             }
             client.say(channel, `@${username}, je hebt ${user.currency} valuta.`);
         } catch (error) {
             console.error('Fout bij ophalen valuta:', error);
-            client.say(channel, `@${username}, er ging iets mis bij het ophalen van je valuta.`);
+            client.say(channel, `@${username}, something went wrong while fetching your balance.`);
         }
     } else if (message.toLowerCase() === '!claim') {
         try {
             const user = await User.findOne({ twitchId: twitchId });
             if (!user) {
-                client.say(channel, `@${username}, om een dagelijks pakketje te claimen, moet je eerst inloggen: https://maelmon-backend.onrender.com/auth/twitch`);
+                client.say(channel, `@${username}, to claim a daily pack, you must first log in: https://maelmon-backend.onrender.com/auth/twitch`);
                 return;
             }
 
@@ -412,7 +412,7 @@ client.on('message', async (channel, tags, message, self) => {
                 const timeLeft = DAILY_PACK_COOLDOWN_MS - (now.getTime() - user.lastPackClaimed.getTime());
                 const hours = Math.floor(timeLeft / (1000 * 60 * 60));
                 const minutes = Math.floor((timeLeft % (1000 * 60 * 60)) / (1000 * 60));
-                client.say(channel, `@${username}, je hebt je dagelijkse pakket al geclaimd. Probeer over ${hours} uur en ${minutes} minuten opnieuw.`);
+                client.say(channel, `@${username}, you have already claimed your daily pack. Try again in ${hours} hours and ${minutes} minutes.`);
                 return;
             }
 
@@ -422,7 +422,7 @@ client.on('message', async (channel, tags, message, self) => {
             );
 
             if (winnableCards.length === 0) {
-                client.say(channel, `@${username}, er zijn momenteel geen kaarten beschikbaar om te winnen.`);
+                client.say(channel, `@${username}, currently there are no cards available to win.`);
                 return;
             }
 
@@ -449,21 +449,21 @@ client.on('message', async (channel, tags, message, self) => {
             user.lastPackClaimed = now;
             await user.save();
 
-            client.say(channel, `@${username}, gefeliciteerd! Je hebt de kaart "${newCardInstance.name}" gewonnen!`);
+            client.say(channel, `@${username}, Congrats! You have won a "${newCardInstance.name}" card!`);
 
         } catch (error) {
             console.error('Fout bij !claim commando:', error);
-            client.say(channel, `@${username}, er ging iets mis bij het claimen van je dagelijkse pakket.`);
+            client.say(channel, `@${username}, something went wrong.`);
         }
     } else if (message.toLowerCase() === '!commands') { // NIEUW: !commands commando
         const commands = [
-            '!hello (zeg hallo tegen de bot)',
-            '!mycards (zie je verzamelde kaarten)',
-            '!balance (check je valuta)',
-            '!claim (claim je dagelijkse gratis pakketje)',
-            '!commands (zie alle beschikbare commando\'s)'
+            '!hello (Say hello to the bot)',
+            '!mycards (See the cards you own - requires login)',
+            '!mybalance (check how much money you have - requires login)',
+            '!claim (claim your daily pack - requires login)',
+            '!commands (see all current commands)'
         ];
-        client.say(channel, `@${username}, beschikbare commando's: ${commands.join(' | ')}`);
+        client.say(channel, `@${username}, here are the current commands: ${commands.join(' | ')}`);
     }
 });
 
