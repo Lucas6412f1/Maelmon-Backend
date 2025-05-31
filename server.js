@@ -1,45 +1,75 @@
 // server.js
 
-// 1. Vereiste modules importeren
-require('dotenv').config(); // Laadt .env variabelen (voor lokale ontwikkeling)
+// Importeer de benodigde modules
+require('dotenv').config(); // Zorg dat dotenv is geïnstalleerd en gebruikt voor lokale ontwikkeling
 const express = require('express');
-const session = require('express-session');
-const MongoStore = require('connect-mongo'); // Voor persistente sessies
-const passport = require('passport');
-const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy; // De correcte Twitch strategie
 const mongoose = require('mongoose');
-const cors = require('cors');
-const tmi = require('tmi.js'); // Voor de Twitch Chat Bot
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+const passport = require('passport');
+const TwitchStrategy = require('passport-twitch').Strategy;
+const tmi = require('tmi.js');
+const cors = require('cors'); // Voor Cross-Origin Resource Sharing, als je frontend op een ander domein draait
 
-// 2. Express applicatie initialiseren
+// Importeer het User model
+// LET OP: Zorg ervoor dat de naam van dit bestand in de map 'models' ook 'User.js' is!
+const User = require('./models/User');
+
 const app = express();
-// Poortconfiguratie: Gebruik Render's PORT variabele of standaard 10000
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 10000; // Render gebruikt de PORT env variable
 
-// 3. MongoDB verbinding
+// --- Middleware ---
+app.use(express.json()); // Voor het parsen van JSON bodies
+app.use(express.urlencoded({ extended: true })); // Voor het parsen van URL-encoded bodies
+
+// CORS configuratie
+// Pas 'origin' aan naar de URL van je frontend applicatie
+app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000', // Bijv. 'https://jouw-frontend.onrender.com'
+    credentials: true // Belangrijk voor het versturen van cookies/sessies
+}));
+
+
+// --- MongoDB Verbinding ---
+// Zorg ervoor dat MONGO_URI is ingesteld als een Environment Variable in Render
+// Voorbeeld waarde in Render: mongodb+srv://user:pass@cluster.mongodb.net/Maelmon?retryWrites=true&w=majority
+// Let op de '/Maelmon' voor je database naam! Dit is CRUCIAAL.
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('Verbonden met MongoDB Atlas!'))
     .catch(err => console.error('Fout bij verbinden met MongoDB:', err));
 
-// 4. Mongoose User Schema en Model
-const userSchema = new mongoose.Schema({
-    twitchId: { type: String, required: true, unique: true },
-    username: { type: String, required: true, unique: true },
-    displayName: { type: String, required: true },
-    profileImageUrl: { type: String, default: '' },
-    currency: { type: Number, default: 0 },
-    isAdmin: { type: Boolean, default: false }
-});
+// --- Sessie Beheer met MongoStore ---
+// Zorg ervoor dat SESSION_SECRET is ingesteld als een Environment Variable in Render
+// Gebruik een lange, willekeurige string als geheime sleutel (bijv. via https://www.grc.com/passwords.htm)
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'verander_dit_naar_een_zeer_sterke_geheime_sleutel_EN_STEL_IN_VIA_ENV',
+    resave: false, // Zet op false tenzij je database opslag problemen hebt
+    saveUninitialized: false, // Zet op false om onnodige sessies te voorkomen
+    store: MongoStore.create({
+        mongoUrl: process.env.MONGO_URI, // Gebruik dezelfde MONGO_URI
+        ttl: 14 * 24 * 60 * 60, // Sessies verlopen na 14 dagen (standaard)
+        autoRemove: 'interval',
+        autoRemoveInterval: 10 // Verwijder verlopen sessies elke 10 minuten
+    }),
+    cookie: {
+        maxAge: 1000 * 60 * 60 * 24 * 14, // 14 dagen in milliseconden
+        secure: process.env.NODE_ENV === 'production', // true in productie (HTTPS), false in ontwikkeling (HTTP)
+        httpOnly: true, // Voorkomt client-side JavaScript toegang tot cookie
+        sameSite: 'lax' // Of 'none' als je een compleet andere frontend domein hebt (vereist secure: true)
+    }
+}));
 
-const User = mongoose.model('User', userSchema);
+// --- Passport.js Initialisatie ---
+app.use(passport.initialize());
+app.use(passport.session());
 
-// 5. Passport.js serialisatie/deserialisatie
-// Gebruiker opslaan in sessie
+// --- Passport Serialisatie/Deserialisatie ---
+// Bepaalt welke gebruikersinformatie wordt opgeslagen in de sessie
 passport.serializeUser((user, done) => {
     done(null, user.id);
 });
 
-// Gebruiker ophalen uit sessie
+// Hoe de gebruiker wordt opgehaald uit de database op basis van de sessie-ID
 passport.deserializeUser(async (id, done) => {
     try {
         const user = await User.findById(id);
@@ -49,113 +79,168 @@ passport.deserializeUser(async (id, done) => {
     }
 });
 
-// 6. Passport Twitch Strategie
+// --- Passport Twitch Strategie ---
+// Zorg ervoor dat TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, en TWITCH_CALLBACK_URL
+// allemaal zijn ingesteld als Environment Variables in Render!
 passport.use(new TwitchStrategy({
     clientID: process.env.TWITCH_CLIENT_ID,
     clientSecret: process.env.TWITCH_CLIENT_SECRET,
-    callbackURL: process.env.TWITCH_CALLBACK_URL,
-    scope: 'user:read:email', // Vraagt om email, hoewel Twitch dit voor bots niet altijd direct geeft
-    passReqToCallback: true // Zorgt ervoor dat 'req' beschikbaar is in de verify callback (niet essentieel voor deze code, maar vaak handig)
+    callbackURL: process.env.TWITCH_CALLBACK_URL, // Dit was de 'Missing params' fout!
+    scope: 'user:read:email', // Deze scope is nodig om e-mail te lezen, voeg meer toe indien nodig
+    passReqToCallback: true
 },
-// Dit is de 'verify' functie die wordt aangeroepen na de Twitch authenticatie
-async function(req, accessToken, refreshToken, profile, done) {
+async (req, accessToken, refreshToken, profile, done) => {
     try {
-        // Log de profielgegevens die van Twitch komen (voor debugging)
-        console.log("Twitch Profile:", profile);
+        // Zoek of de gebruiker al bestaat in onze database met hun Twitch ID
+        let user = await User.findOne({ twitchId: profile.id });
 
-        // Zoek de gebruiker in de database op basis van twitchId
-        // NIEUW: Gebruik await, want findOne retourneert een Promise
-        const user = await User.findOne({ twitchId: profile.id });
-
-        if (!user) {
-            // Gebruiker niet gevonden, maak een nieuwe aan
+        if (user) {
+            // Gebruiker bestaat al, update eventueel tokens of profielgegevens
+            user.accessToken = accessToken;
+            user.refreshToken = refreshToken;
+            user.profileImageUrl = profile.profile_image_url; // Update profielfoto
+            user.displayName = profile.display_name; // Update display naam
+            await user.save();
+            return done(null, user);
+        } else {
+            // Nieuwe gebruiker, maak een entry aan
             const newUser = new User({
                 twitchId: profile.id,
                 username: profile.login,
                 displayName: profile.display_name,
                 profileImageUrl: profile.profile_image_url,
-                currency: 100, // Startgeld
-                isAdmin: false // Nieuwe gebruikers zijn standaard geen admin
+                email: profile.email, // Vereist 'user:read:email' scope
+                currency: 0, // Standaardwaarde voor nieuwe gebruikers
+                isAdmin: false, // Standaardwaarde voor nieuwe gebruikers
+                accessToken: accessToken, // Opslaan voor toekomstige Twitch API calls
+                refreshToken: refreshToken
             });
-            await newUser.save(); // NIEUW: Gebruik await voor opslaan
-            console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen.`);
+            await newUser.save();
             return done(null, newUser);
-        } else {
-            // Gebruiker al bekend, update eventueel gegevens
-            user.displayName = profile.display_name;
-            user.profileImageUrl = profile.profile_image_url;
-            // Je kunt hier meer velden updaten indien nodig
-            await user.save(); // NIEUW: Gebruik await voor opslaan
-            console.log(`Gebruiker ${user.username} al bekend, ingelogd.`);
-            return done(null, user);
         }
     } catch (err) {
-        // Als er een fout optreedt, geef deze door aan Passport
-        console.error("Fout in Passport verify functie:", err);
-        return done(err);
+        console.error('Fout tijdens Twitch authenticatie:', err);
+        return done(err, null);
     }
 }));
 
-// 7. Express middleware configuratie
-
-// CORS instellingen voor cross-origin requests
-app.use(cors({
-    origin: process.env.FRONTEND_URL, // Vervang dit met de daadwerkelijke URL van je frontend op Render
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    credentials: true // Belangrijk voor het doorsturen van cookies/sessies
-}));
-
-app.use(express.json()); // Body parser voor JSON
-app.use(express.urlencoded({ extended: true })); // Body parser voor URL-encoded data
-
-// Sessie middleware
-app.use(session({
-    secret: process.env.SESSION_SECRET, // Een sterke, geheime sleutel
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({ // Gebruik MongoStore voor persistente sessies
-        mongoUrl: process.env.MONGO_URI,
-        collectionName: 'sessions', // Naam van de collectie voor sessies in MongoDB
-        ttl: 14 * 24 * 60 * 60 // Sessie TTL in seconden (14 dagen)
-    }),
-    cookie: {
-        maxAge: 1000 * 60 * 60 * 24 * 7, // 7 dagen
-        secure: true, // Cookies alleen via HTTPS (verplicht voor sameSite: 'none')
-        sameSite: 'none' // Essentieel voor cross-site cookie werking
-    }
-}));
-
-// Passport initialiseren
-app.use(passport.initialize());
-app.use(passport.session());
-
-// 8. Routes
-
-// Hoofdpagina route (kan ook een simpel bericht zijn of redirect)
-app.get('/', (req, res) => {
-    res.send('MaelMon Backend is running!');
+// --- Twitch Bot Client Initialisatie ---
+// Zorg ervoor dat TWITCH_BOT_USERNAME, TWITCH_BOT_OAUTH (oauth: token), TWITCH_CHANNEL_NAME
+// zijn ingesteld als Environment Variables in Render!
+const client = new tmi.Client({
+    options: { debug: true },
+    connection: {
+        secure: true,
+        reconnect: true
+    },
+    identity: {
+        username: process.env.TWITCH_BOT_USERNAME,
+        password: process.env.TWITCH_BOT_OAUTH // Dit moet een 'oauth:' token zijn!
+    },
+    channels: [process.env.TWITCH_CHANNEL_NAME] // Dit is het kanaal waar de bot in komt
 });
 
-// Twitch authenticatie routes
+// Verbind de bot met Twitch
+client.connect();
+
+// Console log wanneer de bot verbonden is
+client.on('connected', (addr, port) => {
+    console.log(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] info: Connected to ${addr}:${port}`);
+});
+
+// --- TMI.js 'message' handler met robuuste foutafhandeling ---
+client.on('message', async (channel, tags, message, self) => {
+    if (self) return; // Negeer berichten van de bot zelf
+
+    try {
+        // Haal de gebruiker op uit de database, of null als deze niet bestaat
+        let user = await User.findOne({ twitchId: tags['user-id'] });
+
+        if (!user) {
+            // Als de gebruiker niet gevonden is, probeer een nieuwe aan te maken
+            const newUser = new User({
+                twitchId: tags['user-id'],
+                username: tags['username'],
+                displayName: tags['display-name'],
+                profileImageUrl: tags['user-image'],
+                currency: 0,
+                isAdmin: false
+            });
+
+            try {
+                await newUser.save();
+                console.log(`Nieuwe gebruiker ${newUser.displayName} (Twitch ID: ${newUser.twitchId}) via chat geregistreerd.`);
+
+                // Probeer een welkomstbericht te sturen, met foutafhandeling
+                try {
+                    // Deze fout ("Cannot send anonymous messages") treedt op als de bot
+                    // geen juiste authenticatie/scopes heeft om te praten
+                    await client.say(channel, `Welcome to MaelMon, ${tags['display-name']}! Type !currency to check your balance.`);
+                } catch (chatError) {
+                    console.error(`Fout bij sturen welkomstbericht aan ${tags['display-name']} (bot authenticatie?):`, chatError.message);
+                }
+            } catch (saveError) {
+                // Vang de E11000 duplicate key error op
+                if (saveError.code === 11000) {
+                    console.warn(`Gebruiker ${tags['display-name']} (Twitch ID: ${tags['user-id']}) bestaat al. Geen nieuwe entry toegevoegd.`);
+                } else {
+                    console.error(`Fout bij opslaan nieuwe gebruiker ${tags['display-name']}:`, saveError);
+                }
+            }
+        }
+
+        // --- Hier komt de rest van je command-afhandeling (bijv. !currency, !commands, etc.) ---
+        // Zorg ervoor dat je 'user' of 'newUser' variabele gebruikt voor de commando's
+        // Let op: 'user' is de bestaande gebruiker, 'newUser' is de zojuist aangemaakte.
+        // Je kunt een variabele zoals 'activeUser' definiëren: const activeUser = user || newUser;
+        const activeUser = user || await User.findOne({ twitchId: tags['user-id'] }); // Zorg dat we de meest actuele gebruiker hebben
+
+        if (activeUser) { // Controleer altijd of er een gebruiker object is
+            if (message.toLowerCase() === '!currency') {
+                try {
+                    await client.say(channel, `@${tags['display-name']}, je hebt ${activeUser.currency} currency.`);
+                } catch (chatError) {
+                    console.error(`Fout bij sturen currency bericht aan ${tags['display-name']}:`, chatError.message);
+                }
+            }
+            // ... voeg hier andere commando's toe, bijv. !leaderboard, !card, etc.
+        } else {
+            console.warn(`Kon geen gebruiker vinden/aanmaken voor ${tags['display-name']} om commando's te verwerken.`);
+        }
+
+    } catch (error) {
+        console.error('Algemene fout in TMI.js message handler:', error);
+    }
+});
+
+
+// --- Express Routes ---
+// Definieer de API endpoints van je backend
+// Voorbeeld: Hoofdpagina
+app.get('/', (req, res) => {
+    res.send('MaelMon Backend draait!');
+});
+
+// Twitch authenticatie route
 app.get('/auth/twitch', passport.authenticate('twitch'));
 
+// Callback route na succesvolle Twitch authenticatie
 app.get('/auth/twitch/callback',
-    passport.authenticate('twitch', { failureRedirect: `${process.env.FRONTEND_URL}/login.html` }),
+    passport.authenticate('twitch', { failureRedirect: process.env.FRONTEND_URL || '/' }), // Redirect bij falen
     (req, res) => {
-        // Succesvolle authenticatie, redirect naar de hoofdpagina van de frontend
-        res.redirect(process.env.FRONTEND_URL || '/'); // Redirect naar frontend URL
+        // Succesvolle authenticatie, stuur de gebruiker door naar de frontend
+        res.redirect(process.env.FRONTEND_URL + '/profile' || '/profile'); // Pas dit aan naar je frontend profielpagina
     }
 );
 
-// Route om de ingelogde gebruiker op te halen
-app.get('/api/user', (req, res) => {
+// Route om in te loggen via de backend (controleert of gebruiker is ingelogd)
+app.get('/auth/status', (req, res) => {
     if (req.isAuthenticated()) {
+        // Stuur alleen noodzakelijke user info terug, NIET gevoelige data
         res.json({
             loggedIn: true,
             user: {
                 id: req.user.id,
-                twitchId: req.user.twitchId,
-                username: req.user.username,
                 displayName: req.user.displayName,
                 profileImageUrl: req.user.profileImageUrl,
                 currency: req.user.currency,
@@ -163,100 +248,38 @@ app.get('/api/user', (req, res) => {
             }
         });
     } else {
-        res.status(401).json({ loggedIn: false, message: 'Niet geauthenticeerd.' });
+        res.json({ loggedIn: false });
     }
 });
 
 // Logout route
-app.get('/logout', (req, res) => {
-    req.logout((err) => {
-        if (err) { return res.status(500).send('Fout bij uitloggen.'); }
-        req.session.destroy(() => {
-            // Redirect naar de frontend login pagina na uitloggen
-            res.redirect(`${process.env.FRONTEND_URL}/login.html`);
+app.get('/logout', (req, res, next) => {
+    req.logout((err) => { // Passport.js logout functie
+        if (err) {
+            return next(err);
+        }
+        req.session.destroy(() => { // Sessie vernietigen
+            res.clearCookie('connect.sid'); // Verwijder de sessiecookie
+            res.redirect(process.env.FRONTEND_URL || '/'); // Redirect naar de homepage (of frontend login)
         });
     });
 });
 
-// Admin card management API (voorbeeld)
-// Deze route moet beveiligd worden, bijvoorbeeld met een admin check
-app.post('/api/admin/cards', async (req, res) => {
-    // Voeg hier logica toe om te controleren of de gebruiker admin is
-    // if (!req.isAuthenticated() || !req.user.isAdmin) {
-    //     return res.status(403).json({ message: 'Toegang geweigerd.' });
-    // }
-
-    try {
-        const { name, type, attack, defense, rarity, description, characterImageUrl } = req.body;
-        // Voorbeeld: Sla kaart op in MongoDB (je hebt een Card model nodig)
-        // const newCard = new Card({ name, type, attack, defense, rarity, description, characterImageUrl });
-        // await newCard.save();
-        res.status(201).json({ message: 'Kaart toegevoegd (simulatie)', card: req.body });
-    } catch (error) {
-        console.error('Fout bij toevoegen kaart:', error);
-        res.status(500).json({ message: 'Interne serverfout bij toevoegen kaart.' });
+// Voorbeeld van een beschermde route (alleen voor ingelogde gebruikers)
+app.get('/profile', (req, res) => {
+    if (req.isAuthenticated()) {
+        res.json({
+            message: `Welkom, ${req.user.displayName}! Je bent ingelogd.`,
+            user: req.user // Stuur het hele user object terug (voor test doeleinden)
+        });
+    } else {
+        res.status(401).json({ message: 'Niet geautoriseerd. Log in.' });
     }
 });
 
+// Voeg hier andere routes toe, bijv. voor cards, admin functies etc.
 
-// 9. Server starten
+// --- Server Start ---
 app.listen(PORT, () => {
     console.log(`MaelMon Backend server draait op poort ${PORT}`);
-});
-
-// 10. Twitch Chat Bot (apart gedeelte)
-const client = new tmi.Client({
-    options: { debug: true },
-    connection: {
-        reconnect: true,
-        secure: true
-    },
-    identity: {
-        username: process.env.TWITCH_BOT_USERNAME, // Bot's Twitch username
-        password: process.env.TWITCH_BOT_OAUTH // Bot's Twitch OAuth token (start met oauth:)
-    },
-    channels: [process.env.TWITCH_CHANNEL_NAME] // Het kanaal waar de bot actief moet zijn
-});
-
-client.connect(); // Verbind de bot met Twitch Chat
-
-client.on('message', async (channel, tags, message, self) => {
-    if (self) return; // Ignore messages from the bot itself
-
-    // Voeg de gebruiker toe aan de database als die nog niet bestaat
-    let user = await User.findOne({ twitchId: tags['user-id'] });
-
-    if (!user) {
-        // Als de bot een bericht krijgt van een onbekende gebruiker, registreer hem.
-        user = new User({
-            twitchId: tags['user-id'],
-            username: tags['username'],
-            displayName: tags['display-name'],
-            profileImageUrl: tags['user-image'],
-            currency: 0, // Beginvaluta voor chat-geregistreerde gebruikers
-            isAdmin: false
-        });
-        await user.save();
-        client.say(channel, `Welcome to MaelMon, ${tags['display-name']}! Type !currency to check your balance.`);
-        console.log(`Nieuwe gebruiker ${tags['display-name']} via chat geregistreerd.`);
-    }
-
-    if (message.toLowerCase() === '!currency' || message.toLowerCase() === '!balance' || message.toLowerCase() === '!mybalance') {
-        client.say(channel, `${user.displayName}, your current currency is ${user.currency} ⭐.`);
-    }
-
-    // Andere bot commando's kunnen hier worden toegevoegd
-});
-
-client.on('connected', (address, port) => {
-    console.log(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] info: Connected to ${address}:${port}`);
-});
-
-// Foutafhandeling voor de bot
-client.on('disconnected', (reason) => {
-    console.error(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] error: Disconnected from Twitch chat: ${reason}`);
-});
-
-client.on('reconnect', () => {
-    console.log(`[${new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })}] info: Attempting to reconnect to Twitch chat...`);
 });
