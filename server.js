@@ -9,7 +9,9 @@ const tmi = require('tmi.js'); // Voor de Twitch bot
 // NIEUWE IMPORTS VOOR AUTHENTICATIE
 const session = require('express-session');
 const passport = require('passport');
-const TwitchStrategy = require('passport-twitch').Strategy;
+// >>> BELANGRIJK: Dit is de bijgewerkte import!
+const TwitchStrategy = require('@d-fischer/passport-twitch').Strategy;
+
 
 // Zorg ervoor dat dotenv bovenaan staat als je het gebruikt voor lokale tests
 require('dotenv').config();
@@ -32,21 +34,18 @@ const CardSchema = new mongoose.Schema({
     attack: { type: Number, required: true },
     defense: { type: Number, required: true },
     imageUrl: { type: String, required: true },
-    // NIEUW: Voeg een veld toe om de kaart aan een gebruiker te koppelen
-    // Dit wordt ingevuld nadat de user model is gemaakt en de bot logica is aangepast
     ownerId: { type: String, default: null } // Twitch user ID van de eigenaar
 });
 const Card = mongoose.model('Card', CardSchema);
 
-// NIEUW: User Model Placeholder (dit is de volgende stap!)
-// Je zult dit vervangen door een echt Mongoose schema voor gebruikers.
-// Voor nu dient het alleen om de Passport-functies te laten werken.
+// NIEUW: User Model
+// Dit is het model dat gebruikersgegevens opslaat in je MongoDB
 const UserSchema = new mongoose.Schema({
     twitchId: { type: String, required: true, unique: true },
     username: { type: String, required: true },
-    email: { type: String, required: false }, // afhankelijk van de scope die je vraagt
+    email: { type: String, required: false },
     profileImageUrl: { type: String, required: false },
-    // andere user-specifieke data
+    createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
 
@@ -54,36 +53,35 @@ const User = mongoose.model('User', UserSchema);
 // 5. Middleware configureren
 // CORS instellingen
 app.use(cors({
-    // Pas dit aan naar de exacte URL(s) van je frontend
     origin: ['https://maelmon-trading-cards.onrender.com', 'http://localhost:3000'],
-    credentials: true // Belangrijk voor het versturen van cookies (sessies) over domeinen heen
+    credentials: true
 }));
-app.use(express.json()); // Voor het parsen van JSON body's
+app.use(express.json());
 
 // NIEUW: Express Session middleware
-// Nodig voor het opslaan van de gebruikerssessie
 app.use(session({
-    secret: process.env.SESSION_SECRET, // Moet een lange, willekeurige en GEHEIME string zijn!
-    resave: false, // Sessie niet opnieuw opslaan als er geen wijzigingen zijn
-    saveUninitialized: false, // Geen sessie opslaan voor niet-geauthenticeerde gebruikers
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
     cookie: {
-        secure: process.env.NODE_ENV === 'production', // true in productie (HTTPS), false lokaal
-        httpOnly: true, // Voorkomt client-side JavaScript toegang tot cookie
-        maxAge: 24 * 60 * 60 * 1000 // 24 uur (hoe lang de sessie geldig is)
+        secure: process.env.NODE_ENV === 'production',
+        httpOnly: true,
+        maxAge: 24 * 60 * 60 * 1000
     }
 }));
 
 // NIEUW: Initialiseer Passport
 app.use(passport.initialize());
-app.use(passport.session()); // Gebruik sessies voor persistente logins
+app.use(passport.session());
 
 // 6. Passport Twitch Strategie configureren
 passport.use(new TwitchStrategy({
     clientID: process.env.TWITCH_CLIENT_ID,
     clientSecret: process.env.TWITCH_CLIENT_SECRET,
-    callbackURL: "https://maelmon-trading-cards.onrender.com/auth/twitch/callback", // MOET OVEREENKOMEN met de URL in je Twitch Dev Console!
-    scope: "user:read:email", // Vraag permissie om de e-mail van de gebruiker te lezen (optioneel)
-    // Voeg hier ook 'channel:read:subscriptions', 'channel:read:redemptions' of andere scopes toe die je bot nodig heeft
+    // >>> BELANGRIJK: Dit is de URL van JE BACKEND SERVICE!
+    // >>> Deze moet EXACT OVEREENKOMEN met de Redirect URL in je Twitch Dev Console!
+    callbackURL: "https://maelmon-backend.onrender.com/auth/twitch/callback",
+    scope: "user:read:email", // Scopes die je wilt aanvragen van de gebruiker
 },
 function(accessToken, refreshToken, profile, done) {
     // Deze functie wordt aangeroepen na succesvolle authenticatie bij Twitch
@@ -94,6 +92,7 @@ function(accessToken, refreshToken, profile, done) {
         .then(currentUser => {
             if (currentUser) {
                 // Gebruiker bestaat al, return die gebruiker
+                console.log(`Gebruiker ${currentUser.username} al bekend, ingelogd.`);
                 done(null, currentUser);
             } else {
                 // Nieuwe gebruiker, maak een nieuw record aan
@@ -104,6 +103,7 @@ function(accessToken, refreshToken, profile, done) {
                     profileImageUrl: profile.profile_image_url
                 }).save()
                   .then(newUser => {
+                      console.log(`Nieuwe gebruiker ${newUser.username} opgeslagen.`);
                       done(null, newUser);
                   })
                   .catch(err => done(err));
@@ -114,15 +114,11 @@ function(accessToken, refreshToken, profile, done) {
 ));
 
 // 7. Passport: Hoe gebruikersdata in en uit de sessie wordt opgeslagen
-// Dit is cruciaal voor Passport om gebruikerssessies te onderhouden.
 passport.serializeUser((user, done) => {
-    // Opslaan van de gebruikers-ID in de sessie
     done(null, user.id);
 });
 
 passport.deserializeUser((id, done) => {
-    // Op basis van de ID in de sessie, de gebruiker ophalen uit de database
-    // HIER WORDT HET BELANG VAN HET USER MODEL DUIDELIJK
     User.findById(id)
         .then(user => {
             done(null, user);
@@ -132,7 +128,6 @@ passport.deserializeUser((id, done) => {
 
 
 // 8. API Routes
-// Algemene route om alle kaarten op te halen (kan later worden gefilterd per gebruiker)
 app.get('/api/cards', async (req, res) => {
     try {
         const cards = await Card.find();
@@ -149,22 +144,20 @@ app.get('/auth/twitch', passport.authenticate('twitch'));
 
 // Callback route na authenticatie bij Twitch
 app.get('/auth/twitch/callback',
-    passport.authenticate('twitch', { failureRedirect: '/' }), // Redirect naar homepage bij falen
+    passport.authenticate('twitch', { failureRedirect: 'https://maelmon-trading-cards.onrender.com/' }), // Redirect naar homepage frontend bij falen
     function(req, res) {
-        // Succesvolle authenticatie, redirect naar een dashboard of profielpagina
-        // Dit moet de URL van je frontend zijn waar je de ingelogde gebruiker naartoe stuurt
-        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard'); // Of een andere relevante pagina
+        // Succesvolle authenticatie, redirect naar een dashboard of profielpagina op je frontend
+        res.redirect('https://maelmon-trading-cards.onrender.com/dashboard'); // Of een andere relevante pagina op je frontend
     }
 );
 
 // Optionele route om de ingelogde gebruiker te testen
 app.get('/api/user', (req, res) => {
-    if (req.user) { // req.user is beschikbaar via Passport als de gebruiker is ingelogd
+    if (req.user) {
         res.json({
             isLoggedIn: true,
             username: req.user.username,
             twitchId: req.user.twitchId,
-            // Stuur geen gevoelige data zoals accessToken
         });
     } else {
         res.json({ isLoggedIn: false });
@@ -173,14 +166,14 @@ app.get('/api/user', (req, res) => {
 
 // Route om uit te loggen
 app.get('/auth/logout', (req, res) => {
-    req.logout((err) => { // Passport's logout functie
+    req.logout((err) => {
         if (err) { return next(err); }
-        res.redirect('https://maelmon-trading-cards.onrender.com/'); // Redirect naar homepage na uitloggen
+        res.redirect('https://maelmon-trading-cards.onrender.com/');
     });
 });
 
 
-// 9. Twitch Bot Client (deze had je waarschijnlijk al)
+// 9. Twitch Bot Client
 const client = new tmi.Client({
     options: { debug: true },
     connection: {
@@ -188,10 +181,10 @@ const client = new tmi.Client({
         reconnect: true
     },
     identity: {
-        username: process.env.TWITCH_USERNAME, // Aangepast om TWITCH_USERNAME te gebruiken
-        password: process.env.TWITCH_OAUTH_TOKEN // Aangepast om TWITCH_OAUTH_TOKEN te gebruiken
+        username: process.env.TWITCH_USERNAME,
+        password: process.env.TWITCH_OAUTH_TOKEN
     },
-    channels: [process.env.TWITCH_CHANNEL] // Aangepast om TWITCH_CHANNEL te gebruiken
+    channels: [process.env.TWITCH_CHANNEL]
 });
 
 client.connect().then(() => {
@@ -201,10 +194,10 @@ client.connect().then(() => {
 });
 
 client.on('message', async (channel, tags, message, self) => {
-    if (self) return; // Ignore messages from the bot itself
+    if (self) return;
 
     const username = tags['display-name'];
-    const twitchId = tags['user-id']; // Deze is belangrijk voor koppeling!
+    const twitchId = tags['user-id'];
 
     if (message.toLowerCase().startsWith('!addcard ')) {
         const args = message.slice('!addcard '.length).split(',');
@@ -212,17 +205,12 @@ client.on('message', async (channel, tags, message, self) => {
         if (args.length === 5) {
             const [name, type, attack, defense, imageUrl] = args.map(arg => arg.trim());
 
-            // Voorbeeld van het opslaan van een kaart (deze logica moet later worden aangepast
-            // om te controleren of de gebruiker is gekoppeld aan een account
-            // en om de ownerId in te vullen)
             try {
-                // Zoek of de Twitch-gebruiker in onze database bestaat
                 const user = await User.findOne({ twitchId: twitchId });
 
                 if (!user) {
-                    // Gebruiker is niet gekoppeld aan een account in onze DB
-                    client.say(channel, `@${username}, om kaarten toe te voegen, moet je eerst je Twitch-account koppelen op onze website: https://maelmon-trading-cards.onrender.com/login`); // Of de URL van je login pagina
-                    return; // Stop de functie hier
+                    client.say(channel, `@${username}, om kaarten toe te voegen, moet je eerst je Twitch-account koppelen op onze website: https://maelmon-trading-cards.onrender.com/login`);
+                    return;
                 }
 
                 const newCard = new Card({
@@ -231,7 +219,7 @@ client.on('message', async (channel, tags, message, self) => {
                     attack: parseInt(attack),
                     defense: parseInt(defense),
                     imageUrl,
-                    ownerId: user.twitchId // Vul de ownerId in met de Twitch user ID
+                    ownerId: user.twitchId
                 });
 
                 await newCard.save();
@@ -245,7 +233,7 @@ client.on('message', async (channel, tags, message, self) => {
         }
     } else if (message.toLowerCase() === '!hello') {
         client.say(channel, `Hello, @${username}!`);
-    } else if (message.toLowerCase() === '!mycards') { // Nieuwe test command
+    } else if (message.toLowerCase() === '!mycards') {
         try {
             const user = await User.findOne({ twitchId: twitchId });
             if (!user) {
