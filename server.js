@@ -188,10 +188,10 @@ const client = new tmi.Client({
         reconnect: true
     },
     identity: {
-        username: process.env.TWITCH_USERNAME,
-        password: process.env.TWITCH_OAUTH_TOKEN
+        username: process.env.TWITCH_USERNAME, // Aangepast om TWITCH_USERNAME te gebruiken
+        password: process.env.TWITCH_OAUTH_TOKEN // Aangepast om TWITCH_OAUTH_TOKEN te gebruiken
     },
-    channels: [process.env.TWITCH_CHANNEL]
+    channels: [process.env.TWITCH_CHANNEL] // Aangepast om TWITCH_CHANNEL te gebruiken
 });
 
 client.connect().then(() => {
