@@ -1,11 +1,30 @@
 // server.js
 
-require('dotenv').config(); // Laadt omgevingsvariabelen uit .env
+require('dotenv').config();
 
 const express = require('express');
-const tmi = require('tmi.js'); // Twitch Chat Integratie
+const tmi = require('tmi.js');
+const cors = require('cors');
 const app = express();
-const port = process.env.PORT || 3000; // Render zal een PORT variabele instellen
+const port = process.env.PORT || 3000;
+
+// --- CORS Configuratie ---
+// Dit is de ECHTE URL van je DEPLOYDE FRONTEND op Render!
+const frontendUrl = 'https://maelmon-trading-cards.onrender.com'; // <--- DEZE HEB JE NU INGEVULD!
+
+const corsOptions = {
+    origin: frontendUrl, // Sta alleen verzoeken toe vanaf je frontend URL
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    credentials: true,
+    optionsSuccessStatus: 204
+};
+app.use(cors(corsOptions));
+// --- Einde CORS Configuratie ---
+
+
+// Middleware om JSON-requests te parsen
+app.use(express.json());
+
 
 // --- Twitch Chat Bot Configuratie ---
 const twitchClient = new tmi.Client({
@@ -27,15 +46,10 @@ twitchClient.on('connected', (address, port) => {
 
 twitchClient.on('message', (channel, tags, message, self) => {
     if (self) return;
-
     console.log(`[${channel}] ${tags['display-name']}: ${message}`);
-
-    // Voorbeeld: reageer op een "!hello" commando
     if (message.toLowerCase() === '!hello') {
         twitchClient.say(channel, `Hello, ${tags['display-name']}!`);
     }
-
-    // Voorbeeld: reageer op een "!claimcard" commando
     if (message.toLowerCase() === '!claimcard') {
         twitchClient.say(channel, `${tags['display-name']}, you tried to claim a card! (Feature coming soon!)`);
     }
@@ -43,10 +57,8 @@ twitchClient.on('message', (channel, tags, message, self) => {
 
 twitchClient.connect().catch(console.error);
 
-// --- Express Server Configuratie ---
-app.use(express.json()); // Middleware om JSON-requests te parsen
 
-// Eenvoudige test-route
+// --- Express Server Configuratie ---
 app.get('/', (req, res) => {
     res.send('Welcome to the MaelMon Trading Cards Backend!');
 });
@@ -60,7 +72,6 @@ app.get('/api/cards', (req, res) => {
     res.json(cards);
 });
 
-// Start de server
 app.listen(port, () => {
     console.log(`MaelMon Backend server running on http://localhost:${port}`);
 });
